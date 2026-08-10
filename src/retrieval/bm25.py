@@ -12,6 +12,7 @@ This script:
 from __future__ import annotations
 
 import argparse
+from html import parser
 import json
 import re
 import time
@@ -56,7 +57,11 @@ def parse_json_list(value: Any) -> list[Any]:
     return parsed if isinstance(parsed, list) else [parsed]
 
 
-def load_standalone_ids(audit_path: Path) -> set[str]:
+def load_audit_rows(
+    audit_path: Path,
+    question_validity: str,
+) -> pd.DataFrame:
+    """Load completed audit rows for one validity category."""
     if not audit_path.exists():
         raise FileNotFoundError(
             f"Audit file not found: {audit_path}"
@@ -69,7 +74,7 @@ def load_standalone_ids(audit_path: Path) -> set[str]:
             audit["question_validity"]
             .str.strip()
             .str.lower()
-            .eq("standalone")
+            .eq(question_validity.lower())
         )
         &
         (
@@ -78,10 +83,12 @@ def load_standalone_ids(audit_path: Path) -> set[str]:
             .str.lower()
             .isin(["completed", "finished"])
         ),
-        "question_id",
-    ]
+        ["question_id", "rewritten_question"],
+    ].copy()
 
-    return set(final_rows.astype(str))
+    final_rows["question_id"] = final_rows["question_id"].astype(str)
+
+    return final_rows
 
 
 def prepare_questions(
@@ -89,6 +96,7 @@ def prepare_questions(
     split: str | None,
     audit_path: Path | None,
     max_questions: int | None,
+    question_validity: str = "standalone",
 ) -> pd.DataFrame:
     """Apply the evaluation filters used by the BM25 experiment."""
     filtered = questions.copy()
@@ -100,10 +108,18 @@ def prepare_questions(
     filtered = filtered.loc[filtered["has_text_evidence"] == True]  # noqa: E712
 
     if audit_path is not None:
-        standalone_ids = load_standalone_ids(audit_path)
-        filtered = filtered.loc[
-            filtered["question_id"].astype(str).isin(standalone_ids)
-        ]
+        audit_rows = load_audit_rows(
+        audit_path,
+        question_validity=question_validity,
+    )
+
+    filtered["question_id"] = filtered["question_id"].astype(str)
+
+    filtered = filtered.merge(
+        audit_rows,
+        on="question_id",
+        how="inner",
+    )
 
     if max_questions is not None:
         filtered = filtered.head(max_questions)
@@ -123,6 +139,8 @@ def run_bm25(
     split: str | None = None,
     audit_path: Path | None = None,
     max_questions: int | None = None,
+    question_validity: str = "standalone",
+    question_column: str = "question",
 ) -> dict[str, Any]:
     """Run BM25 retrieval and save query-level logs and aggregate metrics."""
     create_directories()
@@ -137,6 +155,7 @@ def run_bm25(
         split=split,
         audit_path=audit_path,
         max_questions=max_questions,
+        question_validity=question_validity,
     )
 
     corpus_tokens = [
@@ -155,7 +174,14 @@ def run_bm25(
     effective_k = min(top_k, len(paragraphs))
 
     for index, question_row in questions.iterrows():
-        question = str(question_row["question"])
+        question = str(question_row[question_column]).strip()
+
+        if not question:
+            raise ValueError(
+                f"Empty {question_column} for question_id="
+                f"{question_row['question_id']}"
+            )
+        
         gold_paper_id = str(question_row["gold_paper_id"])
         gold_paragraph_ids = parse_json_list(
             question_row["gold_paragraph_ids_json"]
@@ -261,6 +287,21 @@ def main() -> None:
         ),
     )
     parser.add_argument("--max-questions", type=int, default=None)
+    parser.add_argument(
+    "--question-validity",
+    type=str,
+    choices=["standalone", "repairable", "ambiguous"],
+    default="standalone",
+    help="Which audited question category to evaluate.",
+)
+
+    parser.add_argument(
+        "--question-column",
+        type=str,
+        choices=["question", "rewritten_question"],
+        default="question",
+        help="Use the original or rewritten question text for retrieval.",
+    )
     args = parser.parse_args()
 
     run_bm25(
@@ -272,6 +313,8 @@ def main() -> None:
         split=args.split,
         audit_path=args.audit,
         max_questions=args.max_questions,
+        question_validity=args.question_validity,
+        question_column=args.question_column,
     )
 
 
