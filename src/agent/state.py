@@ -22,6 +22,10 @@ class PaperRAGState(TypedDict, total=False):
     # Evidence retrieval
     evidence_candidates: list[dict[str, Any]]
 
-    # Output
+    route_confidence: float
+
+    route_reason: str
+
     answer: str
+
     clarification_question: str
