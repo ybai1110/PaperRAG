@@ -8,6 +8,7 @@ from src.agent.state import PaperRAGState
 
 from src.agent.nodes import (
     make_surface_search_node,
+    make_evidence_retrieval_node,
     discovery_node,
     targeted_qa_node,
     needs_context_node,
@@ -18,10 +19,14 @@ from src.agent.router import (
     route_from_state,
 )
 
+from src.agent.generator import (
+    make_answer_generation_node,
+)
 
 def build_graph(
     retriever,
     router_model,
+    paper_store,
 ):
 
     builder = StateGraph(
@@ -58,6 +63,21 @@ def build_graph(
     )
 
     builder.add_node(
+        "evidence_retrieval",
+        make_evidence_retrieval_node(
+            paper_store=paper_store,
+            max_papers=1,
+            top_k=5,
+        ),
+    )   
+    builder.add_node(
+        "generate_answer",
+        make_answer_generation_node(
+            router_model
+        ),
+    )
+
+    builder.add_node(
         "needs_context",
         needs_context_node,
     )
@@ -87,14 +107,25 @@ def build_graph(
     )
 
     builder.add_edge(
-        "discovery",
+        "targeted_qa",
+        "evidence_retrieval",
+    )
+
+    builder.add_edge(
+        "evidence_retrieval",
+        "generate_answer",
+    )
+
+    builder.add_edge(
+        "generate_answer",
         END,
     )
 
     builder.add_edge(
-        "targeted_qa",
+        "discovery",
         END,
     )
+
 
     builder.add_edge(
         "needs_context",

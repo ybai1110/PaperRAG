@@ -18,6 +18,12 @@ dataset = load_dataset(
     split="train",
 )
 
+
+paper_store = {
+    str(paper["id"]): paper
+    for paper in dataset
+}
+
 retriever = build_paper_retriever(
     dataset
 )
@@ -30,36 +36,7 @@ router_model = ChatOpenAI(
 graph = build_graph(
     retriever=retriever,
     router_model=router_model,
+    paper_store=paper_store,
 )
 
-queries = [
-    "multilingual RAG evaluation",
-
-    "How does CamemBERT compare with multilingual BERT?",
-
-    "What dataset did they use?",
-]
-
-
-for query in queries:
-
-    print("\n" + "=" * 80)
-    print("QUERY:", query)
-
-    result = graph.invoke(
-        {
-            "user_query": query
-        }
-    )
-
-    print("ROUTE:", result["route"])
-
-    print(
-        "CONFIDENCE:",
-        result["route_confidence"],
-    )
-
-    print(
-        "REASON:",
-        result["route_reason"],
-    )
+# Test queries

@@ -1,5 +1,7 @@
-from src.retrieval.paper_bm25 import build_paper_retriever
 from datasets import load_dataset
+
+from src.retrieval.paper_bm25 import build_paper_retriever
+
 
 dataset = load_dataset(
     "allenai/qasper",
@@ -8,16 +10,24 @@ dataset = load_dataset(
 
 retriever = build_paper_retriever(dataset)
 
-query = "How big are improvements of supervszed learning results trained on smalled labeled data enhanced with proposed approach copared to basic approach"
+queries = [
+    "multilingual RAG evaluation",
+    "child language learning",
+    "discourse relation detection",
+]
 
-results = retriever.search(
-    query = query,
-    top_k=5,
-)
+for query in queries:
+    print("\n" + "=" * 80)
+    print("QUERY:", query)
 
-for result in results:
-    print(result["rank"])
-    print(result["title"])
-    print(result["score"])
-    print()
+    results = retriever.search(
+        query=query,
+        top_k=5,
+    )
 
+    for result in results:
+        print(
+            result["rank"],
+            result["title"],
+            result["score"],
+        )
