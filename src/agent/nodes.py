@@ -39,15 +39,10 @@ def discovery_node(state: PaperRAGState) -> dict:
         ),
     }
 
-def targeted_qa_node(
-    state: PaperRAGState,
-) -> dict:
-    return {}
-
 
 def make_evidence_retrieval_node(
     paper_store: dict,
-    max_papers: int = 1,
+    max_papers: int = 3,
     top_k: int = 5,
 ) -> Callable:
 

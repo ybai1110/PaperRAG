@@ -10,7 +10,6 @@ from src.agent.nodes import (
     make_surface_search_node,
     make_evidence_retrieval_node,
     discovery_node,
-    targeted_qa_node,
     needs_context_node,
 )
 
@@ -58,15 +57,10 @@ def build_graph(
     )
 
     builder.add_node(
-        "targeted_qa",
-        targeted_qa_node,
-    )
-
-    builder.add_node(
         "evidence_retrieval",
         make_evidence_retrieval_node(
             paper_store=paper_store,
-            max_papers=1,
+            max_papers=3,
             top_k=5,
         ),
     )   
@@ -101,14 +95,9 @@ def build_graph(
         route_from_state,
         {
             "discovery": "discovery",
-            "targeted_qa": "targeted_qa",
+            "targeted_qa": "evidence_retrieval",
             "needs_context": "needs_context",
         },
-    )
-
-    builder.add_edge(
-        "targeted_qa",
-        "evidence_retrieval",
     )
 
     builder.add_edge(

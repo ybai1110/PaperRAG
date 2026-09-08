@@ -33,8 +33,6 @@ class PaperRAGState(TypedDict, total=False):
 
     evidence_query: str
 
-    evidence_query: str
-
     citations: list[dict[str, Any]]
 
     abstained: bool

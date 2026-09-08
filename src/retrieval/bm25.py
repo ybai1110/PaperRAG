@@ -62,10 +62,19 @@ def load_audit_rows(
     question_validity: str,
 ) -> pd.DataFrame:
     """Load completed audit rows for one validity category."""
-    if not audit_path.exists():
-        raise FileNotFoundError(
-            f"Audit file not found: {audit_path}"
+    if audit_path is not None:
+        audit_rows = load_audit_rows(
+            audit_path,
+            question_validity=question_validity,
         )
+
+        filtered["question_id"] = filtered["question_id"].astype(str)
+
+        filtered = filtered.merge(
+            audit_rows,
+            on="question_id",
+            how="inner",
+    )
 
     audit = pd.read_csv(audit_path).fillna("")
 
