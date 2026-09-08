@@ -1,18 +1,6 @@
-"""
-Phase 5: BM25 paragraph retrieval baseline.
-
-This script:
-1. Loads processed paragraphs and questions.
-2. Optionally keeps only manually audited standalone questions.
-3. Retrieves top-k paragraphs using BM25.
-4. Saves a per-query JSONL log.
-5. Reports paper recall, evidence F1, and latency.
-"""
-
 from __future__ import annotations
 
 import argparse
-from html import parser
 import json
 import re
 import time
@@ -62,19 +50,11 @@ def load_audit_rows(
     question_validity: str,
 ) -> pd.DataFrame:
     """Load completed audit rows for one validity category."""
-    if audit_path is not None:
-        audit_rows = load_audit_rows(
-            audit_path,
-            question_validity=question_validity,
+
+    if not audit_path.exists():
+        raise FileNotFoundError(
+            f"Audit file not found: {audit_path}"
         )
-
-        filtered["question_id"] = filtered["question_id"].astype(str)
-
-        filtered = filtered.merge(
-            audit_rows,
-            on="question_id",
-            how="inner",
-    )
 
     audit = pd.read_csv(audit_path).fillna("")
 
@@ -95,10 +75,11 @@ def load_audit_rows(
         ["question_id", "rewritten_question"],
     ].copy()
 
-    final_rows["question_id"] = final_rows["question_id"].astype(str)
+    final_rows["question_id"] = (
+        final_rows["question_id"].astype(str)
+    )
 
     return final_rows
-
 
 def prepare_questions(
     questions: pd.DataFrame,
