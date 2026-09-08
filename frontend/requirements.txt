@@ -1,0 +1,10 @@
+fastapi==0.141.1
+uvicorn==0.52.3
+datasets==3.5.0
+rank-bm25==0.2.2
+numpy==1.26.4
+python-dotenv==1.1.0
+langgraph==1.2.11
+langchain-openai==1.5.1
+openai==3.1.0
+pydantic==2.11.3
