@@ -31,8 +31,8 @@ def build_evidence_documents(
             ):
                 paragraph_id = (
                     f"{paper_id}_"
-                    f"s{section_index}_"
-                    f"p{paragraph_index}"
+                    f"s{section_index:03d}_"
+                    f"s{section_index:03d}_"
                 )
 
                 documents.append(
