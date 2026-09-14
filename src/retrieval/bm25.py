@@ -89,33 +89,48 @@ def prepare_questions(
     question_validity: str = "standalone",
 ) -> pd.DataFrame:
     """Apply the evaluation filters used by the BM25 experiment."""
+
     filtered = questions.copy()
 
     if split is not None:
-        filtered = filtered.loc[filtered["data_split"] == split]
+        filtered = filtered.loc[
+            filtered["data_split"] == split
+        ]
 
-    # Paragraph-level BM25 cannot retrieve figure/table-only evidence.
-    filtered = filtered.loc[filtered["has_text_evidence"] == True]  # noqa: E712
+    # Paragraph-level BM25 cannot retrieve
+    # figure/table-only evidence.
+    filtered = filtered.loc[
+        filtered["has_text_evidence"] == True  # noqa: E712
+    ]
 
     if audit_path is not None:
         audit_rows = load_audit_rows(
-        audit_path,
-        question_validity=question_validity,
-    )
+            audit_path,
+            question_validity=question_validity,
+        )
 
-    filtered["question_id"] = filtered["question_id"].astype(str)
+        filtered["question_id"] = (
+            filtered["question_id"].astype(str)
+        )
 
-    filtered = filtered.merge(
-        audit_rows,
-        on="question_id",
-        how="inner",
-    )
+        filtered = filtered.merge(
+            audit_rows,
+            on="question_id",
+            how="inner",
+        )
 
     if max_questions is not None:
-        filtered = filtered.head(max_questions)
+        sample_size = min(max_questions, len(filtered))
+
+        filtered = filtered.sample(
+            n=sample_size,
+            random_state=42,
+        )
 
     if filtered.empty:
-        raise ValueError("No questions remain after filtering.")
+        raise ValueError(
+            "No questions remain after filtering."
+        )
 
     return filtered.reset_index(drop=True)
 

@@ -14,7 +14,9 @@ def build_paper_documents(
         title = str(paper.get("title") or "")
         abstract = str(paper.get("abstract") or "")
 
-        search_text = f"{title} {abstract}".strip()
+        search_text = (
+            f"{title} {title} {title} {abstract}"
+        ).strip()
 
         documents.append(
             {

@@ -56,6 +56,6 @@ def build_evidence_retriever(
 
     return BM25Retriever(
         documents=documents,
-        text_key="text",
+        text_key="search_text",
         id_key="paragraph_id",
     )
