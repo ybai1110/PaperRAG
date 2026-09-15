@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import string
+import math
 from collections import Counter
 from typing import Iterable, Sequence
 
@@ -17,6 +18,81 @@ def paper_recall_at_k(
     if k <= 0:
         raise ValueError("k must be greater than 0.")
     return float(gold_paper_id in list(retrieved_paper_ids)[:k])
+
+
+def reciprocal_rank_at_k(
+    relevant_ids: Iterable[str],
+    retrieved_ids: Sequence[str],
+    k: int,
+) -> float:
+    """Return reciprocal rank of the first relevant result within k."""
+    if k <= 0:
+        raise ValueError("k must be greater than 0.")
+    relevant = {str(value) for value in relevant_ids}
+    for rank, item_id in enumerate(retrieved_ids[:k], start=1):
+        if str(item_id) in relevant:
+            return 1.0 / rank
+    return 0.0
+
+
+def paper_mrr_at_k(
+    gold_paper_id: str,
+    retrieved_paper_ids: Sequence[str],
+    k: int,
+) -> float:
+    """Return reciprocal rank for a single gold paper within k."""
+    return reciprocal_rank_at_k([gold_paper_id], retrieved_paper_ids, k)
+
+
+def ndcg_at_k(
+    relevant_ids: Iterable[str],
+    retrieved_ids: Sequence[str],
+    k: int,
+) -> float:
+    """Compute binary-relevance nDCG at k."""
+    if k <= 0:
+        raise ValueError("k must be greater than 0.")
+    relevant = {str(value) for value in relevant_ids}
+    if not relevant:
+        return 0.0
+    gains = [
+        1.0 if str(item_id) in relevant else 0.0
+        for item_id in retrieved_ids[:k]
+    ]
+    dcg = sum(gain / math.log2(rank + 1) for rank, gain in enumerate(gains, 1))
+    ideal_count = min(len(relevant), k)
+    ideal_dcg = sum(1.0 / math.log2(rank + 1) for rank in range(1, ideal_count + 1))
+    return dcg / ideal_dcg if ideal_dcg else 0.0
+
+
+def evidence_ranking_metrics(
+    gold_paragraph_ids: Iterable[str],
+    retrieved_paragraph_ids: Sequence[str],
+    k: int,
+) -> dict[str, float]:
+    """Compute the requested binary paragraph-ranking metrics at k."""
+    if k <= 0:
+        raise ValueError("k must be greater than 0.")
+    gold = {str(value) for value in gold_paragraph_ids}
+    # Retrieval IDs are expected to be unique, but deduplicate defensively
+    # while retaining rank order.
+    retrieved = list(dict.fromkeys(str(value) for value in retrieved_paragraph_ids[:k]))
+    overlap = len(gold & set(retrieved))
+    precision = overlap / len(retrieved) if retrieved else 0.0
+    recall = overlap / len(gold) if gold else 0.0
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if precision + recall
+        else 0.0
+    )
+    return {
+        f"evidence_precision_at_{k}": precision,
+        f"evidence_recall_at_{k}": recall,
+        f"evidence_f1_at_{k}": f1,
+        f"evidence_success_at_{k}": float(overlap > 0),
+        f"evidence_mrr_at_{k}": reciprocal_rank_at_k(gold, retrieved, k),
+        f"evidence_ndcg_at_{k}": ndcg_at_k(gold, retrieved, k),
+    }
 
 
 def evidence_precision_recall_f1(

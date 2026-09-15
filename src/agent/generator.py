@@ -100,9 +100,19 @@ def make_answer_generation_node(model):
         }
 
         valid_citation_ids = []
+        citation_scope_violations = []
+        intended_paper_id = state.get("intended_paper_id")
 
         for paragraph_id in decision.cited_paragraph_ids:
             if paragraph_id in evidence_by_id:
+                if (
+                    intended_paper_id is not None
+                    and str(evidence_by_id[paragraph_id]["paper_id"])
+                    != str(intended_paper_id)
+                ):
+                    if paragraph_id not in citation_scope_violations:
+                        citation_scope_violations.append(paragraph_id)
+                    continue
                 if paragraph_id not in valid_citation_ids:
                     valid_citation_ids.append(
                         paragraph_id
@@ -139,6 +149,7 @@ def make_answer_generation_node(model):
                     "The retrieved passages did not provide "
                     "enough information."
                 ),
+                "citation_scope_violations": citation_scope_violations,
             }
 
         if not citations:
@@ -152,6 +163,7 @@ def make_answer_generation_node(model):
                 "abstention_reason": (
                     "The model did not return valid citations."
                 ),
+                "citation_scope_violations": citation_scope_violations,
             }
 
         return {
@@ -159,6 +171,7 @@ def make_answer_generation_node(model):
             "citations": citations,
             "abstained": False,
             "abstention_reason": "",
+            "citation_scope_violations": citation_scope_violations,
         }
 
     return generate_answer_node

@@ -7,15 +7,15 @@ This is a Python-only interface for the deployed PaperRAG API.
 From the repository root:
 
 ```bash
-pip install -r streamlit_app/requirements.txt
-streamlit run streamlit_app/app.py
+pip install -r frontend/requirements.txt
+streamlit run frontend/app.py
 ```
 
 The app uses `https://paperrag-a48p.onrender.com` by default. To use another backend:
 
 ```bash
 export PIPELINE_API_URL=http://localhost:8000
-streamlit run streamlit_app/app.py
+streamlit run frontend/app.py
 ```
 
 ## Deploy on Streamlit Community Cloud
@@ -23,7 +23,7 @@ streamlit run streamlit_app/app.py
 1. Push this directory to the GitHub repository.
 2. Open <https://share.streamlit.io> and select **Create app**.
 3. Choose the `ybai1110/PaperRAG` repository and the `main` branch.
-4. Set the main file path to `streamlit_app/app.py`.
+4. Set the main file path to `frontend/app.py`.
 5. In Advanced settings, choose Python 3.12.
 6. Deploy the app.
 

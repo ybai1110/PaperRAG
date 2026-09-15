@@ -12,6 +12,7 @@ import pandas as pd
 from datasets import DatasetDict, load_dataset
 
 from src.config import PARAGRAPHS_CSV, QUESTIONS_CSV, create_directories
+from src.data.paragraph_ids import make_paragraph_id
 
 
 def normalize_text(text: Any) -> str:
@@ -130,8 +131,10 @@ def build_paragraph_rows(
             if not paragraph_text:
                 continue
 
-            paragraph_id = (
-                f"{paper_id}_s{section_index:03d}_p{paragraph_index:03d}"
+            paragraph_id = make_paragraph_id(
+                paper_id,
+                section_index,
+                paragraph_index,
             )
 
             paragraph_rows.append(

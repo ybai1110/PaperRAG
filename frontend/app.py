@@ -23,13 +23,26 @@ def get_api_url() -> str:
 
 
 def choose_paper(paper_id: str, title: str) -> None:
+    previous_response = st.session_state.response
+    unresolved_query = (
+        str(previous_response.get("query") or "").strip()
+        if previous_response
+        and previous_response.get("route") == "needs_context"
+        else ""
+    )
     st.session_state.selected_paper = {
         "paper_id": paper_id,
         "title": title,
     }
-    st.session_state.query = ""
-    st.session_state.response = None
+    st.session_state.query = unresolved_query
     st.session_state.error = None
+    if unresolved_query:
+        # Resolve the prior clarification by rerunning the original wording
+        # with explicit session context. The paper title is not injected into
+        # the query, so the API can distinguish selection from query content.
+        search(unresolved_query)
+    else:
+        st.session_state.response = None
 
 
 def clear_paper() -> None:
@@ -41,14 +54,23 @@ def clear_paper() -> None:
 
 def search(query: str) -> None:
     selected = st.session_state.selected_paper
-    backend_query = query
+    payload: dict[str, Any] = {
+        "query": query,
+        "question_context_mode": "standalone",
+    }
     if selected:
-        backend_query = f'In the paper "{selected["title"]}", {query}'
+        payload.update(
+            {
+                "selected_paper_id": selected["paper_id"],
+                "selected_paper_title": selected["title"],
+                "question_context_mode": "paper_anchored",
+            }
+        )
 
     try:
         response = requests.post(
             f"{get_api_url()}/search",
-            json={"query": backend_query},
+            json=payload,
             timeout=100,
         )
         response.raise_for_status()

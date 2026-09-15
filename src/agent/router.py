@@ -114,6 +114,24 @@ def make_query_router_node(model):
         state: PaperRAGState,
     ) -> dict:
 
+        context_mode = state.get("question_context_mode", "standalone")
+        if context_mode == "paper_anchored":
+            return {
+                "route": "targeted_qa",
+                "route_confidence": 1.0,
+                "route_reason": (
+                    "The request includes an explicit selected-paper context."
+                ),
+            }
+        if context_mode == "missing_context":
+            return {
+                "route": "needs_context",
+                "route_confidence": 1.0,
+                "route_reason": (
+                    "The request is explicitly marked as missing its referent."
+                ),
+            }
+
         query = state["user_query"]
 
         candidates = state.get(
@@ -148,11 +166,16 @@ def make_query_router_node(model):
             ]
         )
 
-        return {
+        result = {
             "route": decision.route,
             "route_confidence": decision.confidence,
             "route_reason": decision.reason,
         }
+        if decision.route == "needs_context":
+            result["question_context_mode"] = "missing_context"
+        else:
+            result["question_context_mode"] = "standalone"
+        return result
 
     return query_router_node
 

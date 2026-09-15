@@ -1,5 +1,6 @@
 from typing import Any, Iterable
 
+from src.data.paragraph_ids import make_paragraph_id
 from src.retrieval.bm25_engine import BM25Retriever
 
 
@@ -29,10 +30,21 @@ def build_evidence_documents(
             for paragraph_index, paragraph in enumerate(
                 paragraphs
             ):
-                paragraph_id = (
-                    f"{paper_id}_"
-                    f"s{section_index:03d}_"
-                    f"s{section_index:03d}_"
+                text = str(paragraph)
+                paragraph_id = make_paragraph_id(
+                    paper_id,
+                    section_index,
+                    paragraph_index,
+                )
+                search_text = " ".join(
+                    value
+                    for value in (title, str(section_name), text)
+                    if value
+                )
+                ranking_text = " ".join(
+                    value
+                    for value in (str(section_name), text)
+                    if value
                 )
 
                 documents.append(
@@ -41,7 +53,11 @@ def build_evidence_documents(
                         "paper_id": paper_id,
                         "title": title,
                         "section": section_name,
-                        "text": str(paragraph),
+                        "text": text,
+                        "search_text": search_text,
+                        # The hybrid ablation intentionally excludes paper
+                        # title/ID from both ranking branches.
+                        "ranking_text": ranking_text,
                     }
                 )
 

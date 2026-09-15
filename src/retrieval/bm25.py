@@ -16,7 +16,6 @@ from src.config import (
     BM25_METRICS_JSON,
     DEFAULT_TOP_K,
     PARAGRAPHS_CSV,
-    QUESTION_AUDIT_CSV,
     QUESTIONS_CSV,
     create_directories,
 )
@@ -56,7 +55,10 @@ def load_audit_rows(
             f"Audit file not found: {audit_path}"
         )
 
-    audit = pd.read_csv(audit_path).fillna("")
+    audit = pd.read_csv(
+        audit_path,
+        dtype={"question_id": "string"},
+    ).fillna("")
 
     final_rows = audit.loc[
         (
@@ -146,15 +148,24 @@ def run_bm25(
     max_questions: int | None = None,
     question_validity: str = "standalone",
     question_column: str = "question",
+    index_mode: str = "paragraph",
 ) -> dict[str, Any]:
     """Run BM25 retrieval and save query-level logs and aggregate metrics."""
     create_directories()
 
     if top_k <= 0:
         raise ValueError("top_k must be greater than 0.")
+    if index_mode not in {"paragraph", "contextual"}:
+        raise ValueError("index_mode must be 'paragraph' or 'contextual'.")
 
-    paragraphs = pd.read_csv(paragraphs_path).fillna("")
-    questions = pd.read_csv(questions_path)
+    paragraphs = pd.read_csv(
+        paragraphs_path,
+        dtype={"paper_id": "string", "paragraph_id": "string"},
+    ).fillna("")
+    questions = pd.read_csv(
+        questions_path,
+        dtype={"question_id": "string", "gold_paper_id": "string"},
+    )
     questions = prepare_questions(
         questions,
         split=split,
@@ -163,10 +174,24 @@ def run_bm25(
         question_validity=question_validity,
     )
 
-    corpus_tokens = [
-        tokenize(text)
-        for text in paragraphs["paragraph_text"].astype(str)
-    ]
+    if question_column not in questions.columns:
+        raise ValueError(
+            f"Question column '{question_column}' is unavailable. "
+            "Rewritten questions require an audit file."
+        )
+
+    if index_mode == "contextual":
+        indexed_text = (
+            paragraphs["paper_title"].astype(str)
+            + " "
+            + paragraphs["section_name"].astype(str)
+            + " "
+            + paragraphs["paragraph_text"].astype(str)
+        )
+    else:
+        indexed_text = paragraphs["paragraph_text"].astype(str)
+
+    corpus_tokens = [tokenize(text) for text in indexed_text]
     bm25 = BM25Okapi(corpus_tokens)
 
     records: list[QueryLogRecord] = []
@@ -228,7 +253,7 @@ def run_bm25(
         records.append(
             QueryLogRecord(
                 question_id=str(question_row["question_id"]),
-                system_variant=f"bm25_top_{top_k}",
+                system_variant=f"bm25_{index_mode}_top_{top_k}",
                 question=question,
                 gold_paper_id=gold_paper_id,
                 retrieved_paper_ids=retrieved_paper_ids,
@@ -239,6 +264,7 @@ def run_bm25(
                 retrieval_latency_ms=latency_ms,
                 metadata={
                     "data_split": str(question_row["data_split"]),
+                    "index_mode": index_mode,
                 },
             )
         )
@@ -249,8 +275,12 @@ def run_bm25(
     write_jsonl(records, output_log_path)
 
     metrics = {
-        "system_variant": f"bm25_top_{top_k}",
+        "system_variant": f"bm25_{index_mode}_top_{top_k}",
         "number_of_questions": len(records),
+        "selected_question_ids": [
+            record.question_id for record in records
+        ],
+        "random_seed": 42,
         "paper_recall_at_1": mean(recall_at_1),
         "paper_recall_at_5": mean(recall_at_5),
         "paper_recall_at_10": mean(recall_at_10),
@@ -307,6 +337,15 @@ def main() -> None:
         default="question",
         help="Use the original or rewritten question text for retrieval.",
     )
+    parser.add_argument(
+        "--index-mode",
+        choices=["paragraph", "contextual"],
+        default="paragraph",
+        help=(
+            "Index paragraph text only (original baseline), or paper title, "
+            "section name, and paragraph text (improved comparison)."
+        ),
+    )
     args = parser.parse_args()
 
     run_bm25(
@@ -320,6 +359,7 @@ def main() -> None:
         max_questions=args.max_questions,
         question_validity=args.question_validity,
         question_column=args.question_column,
+        index_mode=args.index_mode,
     )
 
 
