@@ -105,7 +105,7 @@ def test_raw_open_domain_graph_input_has_no_gold_paper_context() -> None:
             }
 
     graph = CaptureGraph()
-    records = _run_graph_condition(graph, rows, "test")
+    records = _run_graph_condition(graph, rows, "test", paragraph_cutoff=5)
 
     assert graph.input == {
         "user_query": "What dataset did they use?",

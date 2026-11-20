@@ -33,6 +33,7 @@ def build_graph(
     evidence_top_k: int = 5,
     evidence_per_paper_limit: int | None = None,
     evidence_retriever_mode: Literal["bm25", "hybrid"] = "hybrid",
+    selected_paper_evidence_top_k: int | None = None,
 ):
 
     builder = StateGraph(
@@ -79,6 +80,7 @@ def build_graph(
             top_k=evidence_top_k,
             per_paper_limit=evidence_per_paper_limit,
             retriever_mode=evidence_retriever_mode,
+            selected_paper_top_k=selected_paper_evidence_top_k,
         ),
     )   
     builder.add_node(

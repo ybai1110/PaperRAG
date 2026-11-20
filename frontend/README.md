@@ -18,6 +18,11 @@ export PIPELINE_API_URL=http://localhost:8000
 streamlit run frontend/app.py
 ```
 
+When a question needs a paper reference, use **Search paper titles** to find
+the paper. Selecting **Ask this paper** automatically retries the pending
+question with that paper selected. This flow uses the backend's `GET /papers`
+title lookup and `POST /search` for question answering.
+
 ## Deploy on Streamlit Community Cloud
 
 1. Push this directory to the GitHub repository.

@@ -43,6 +43,8 @@ class PaperRAGState(TypedDict, total=False):
 
     evidence_candidates: list[dict[str, Any]]
 
+    evidence_searched_paper_ids: list[str]
+
     route_confidence: float
 
     route_reason: str

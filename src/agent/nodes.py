@@ -140,6 +140,7 @@ def make_evidence_retrieval_node(
     top_k: int = 5,
     per_paper_limit: int | None = None,
     retriever_mode: Literal["bm25", "hybrid"] = "hybrid",
+    selected_paper_top_k: int | None = None,
 ) -> Callable:
 
     if retriever_mode not in {"bm25", "hybrid"}:
@@ -159,6 +160,7 @@ def make_evidence_retrieval_node(
             result = {
                 "evidence_query": state["user_query"],
                 "evidence_candidates": [],
+                "evidence_searched_paper_ids": [],
             }
             if state.get("question_context_mode") == "paper_anchored":
                 result["intended_paper_id"] = str(
@@ -200,6 +202,7 @@ def make_evidence_retrieval_node(
             return {
                 "evidence_query": state["user_query"],
                 "evidence_candidates": [],
+                "evidence_searched_paper_ids": [],
             }
 
         original_query = state["user_query"]
@@ -226,7 +229,11 @@ def make_evidence_retrieval_node(
 
         evidence_results = evidence_retriever.search(
             query=evidence_query,
-            top_k=top_k,
+            top_k=(
+                selected_paper_top_k
+                if paper_anchored and selected_paper_top_k is not None
+                else top_k
+            ),
             group_key="paper_id",
             per_group_limit=per_paper_limit,
         )
@@ -234,6 +241,9 @@ def make_evidence_retrieval_node(
         result = {
             "evidence_query": evidence_query,
             "evidence_candidates": evidence_results,
+            "evidence_searched_paper_ids": list(
+                dict.fromkeys(str(doc["paper_id"]) for doc in evidence_retriever.documents)
+            ),
         }
         if paper_anchored:
             result["intended_paper_id"] = str(state.get("selected_paper_id") or "")

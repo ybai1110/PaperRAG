@@ -2,7 +2,7 @@ import os
 from contextlib import asynccontextmanager
 
 from datasets import load_dataset
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from langchain_openai import ChatOpenAI
 from typing import Literal
 
@@ -79,15 +79,21 @@ async def lifespan(app: FastAPI):
         surface_top_k=int(os.getenv("PAPER_TOP_K", "5")),
         evidence_max_papers=int(os.getenv("EVIDENCE_MAX_PAPERS", "3")),
         evidence_top_k=int(os.getenv("EVIDENCE_TOP_K", "5")),
+        selected_paper_evidence_top_k=int(
+            os.getenv("SELECTED_PAPER_EVIDENCE_TOP_K", os.getenv("EVIDENCE_TOP_K", "10"))
+        ),
         evidence_per_paper_limit=per_paper_limit,
         evidence_retriever_mode=os.getenv(
             "EVIDENCE_RETRIEVER_MODE", "hybrid"
         ).casefold(),
     )
 
-    yield
-
-    graph = None
+    app.state.paper_store = paper_store
+    try:
+        yield
+    finally:
+        graph = None
+        app.state.paper_store = None
 
 
 app = FastAPI(
@@ -136,6 +142,35 @@ def health():
     return {
         "status": "ok",
         "graph_ready": graph is not None,
+    }
+
+
+@app.get("/papers")
+def search_papers(title: str = Query(min_length=1, max_length=1000)):
+    paper_store = getattr(app.state, "paper_store", None)
+    if paper_store is None:
+        raise HTTPException(status_code=503, detail="PaperRAG is still loading.")
+
+    query = " ".join(title.casefold().split())
+    if not query:
+        raise HTTPException(status_code=422, detail="Enter a paper title.")
+
+    matches = []
+    for paper_id, paper in paper_store.items():
+        paper_title = str(paper.get("title") or "")
+        normalized = " ".join(paper_title.casefold().split())
+        if query in normalized:
+            matches.append((normalized != query, normalized, paper_id, paper))
+
+    return {
+        "results": [
+            {
+                "paper_id": paper_id,
+                "title": paper["title"],
+                "abstract": paper.get("abstract") or "",
+            }
+            for _, _, paper_id, paper in sorted(matches)[:5]
+        ]
     }
 
 

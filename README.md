@@ -41,7 +41,7 @@ flowchart TD
     C -->|discovery| D[discovery<br/>return ranked papers]
     C -->|needs_context| E[needs_context<br/>return clarifying question]
     C -->|targeted_qa| T[targeted_qa<br/>intentional pass-through]
-    T --> F[evidence_retrieval<br/>BM25 · selected paper or top 3 papers · top 5]
+    T --> F[evidence_retrieval<br/>Selected paper · up to 10<br/>Standalone · up to 5]
     F --> G[generate_answer<br/>cited answer or abstention]
     D --> H([Response])
     E --> H
@@ -139,6 +139,11 @@ extractive answers are not production-model quality. Retrieval controls are
 available through `PAPER_TITLE_WEIGHT`, `PAPER_MIN_SCORE`,
 `PAPER_MAX_SCORE_DROP`, `PAPER_TOP_K`, `EVIDENCE_MAX_PAPERS`,
 `EVIDENCE_TOP_K`, and `EVIDENCE_PER_PAPER_LIMIT`.
+
+Standalone QA requests up to five evidence passages by default. Selected-paper
+QA uses `SELECTED_PAPER_EVIDENCE_TOP_K`, then `EVIDENCE_TOP_K` if explicitly set,
+then ten passages. Set `SELECTED_PAPER_EVIDENCE_TOP_K=5` to roll back the
+selected-paper default.
 
 ### Run the UI
 
@@ -288,11 +293,19 @@ python -m src.evaluation.evaluate_graph \
   --model-mode deterministic
 ```
 
-The raw graph input never receives the gold paper ID or title. Normal
-paper/evidence correctness is reported only for manually reviewed standalone
-questions; until review is complete those fields remain `null`, rather than
-turning proposed labels into headline scores. Paper-anchored and oracle results
-are explicitly diagnostic and are never presented as open-domain retrieval.
+The raw graph input never receives the gold paper ID or title. Direct BM25 and
+the graph use the same QASPER split and ordered question IDs. Use
+`--evidence-top-k-values 5 10` to compare both systems at each cutoff. The
+default cutoff is 10. `--direct-top-k` sets the shared cutoff on its own or
+selects the headline cutoff from a sweep. The result includes the corpus
+fingerprint, paper and paragraph counts, ordered question IDs, and variant pairs
+for each cutoff. The processed paragraph CSV is used for the evidence oracle.
+
+Completed final context labels determine the expected route. Reviewed standalone
+discovery and targeted questions enter paper scoring. Only reviewed standalone
+targeted questions with the appropriate gold references enter evidence and
+Answer F1 scoring, including when the router misses them. Headline scores remain
+`null` without eligible reviews. Paper-anchored and oracle runs are diagnostic.
 
 Use `--model-mode openai` only when `OPENAI_API_KEY` is available and a
 production-model run is intended. Structural citation checks do not establish
@@ -315,16 +328,16 @@ Defined in `src/evaluation/metrics.py`:
 | `paper_recall_at_k` | Did the gold paper appear in the top *k* results? |
 | `paper_mrr_at_k` | Reciprocal rank of the gold paper within *k* results |
 | `evidence_precision_recall_f1` | Set overlap between gold and retrieved paragraph IDs |
-| `evidence_ranking_metrics` | Evidence Precision/Recall/F1/Success/MRR/nDCG at a requested cutoff; evaluation reports @5 and @10 |
+| `evidence_ranking_metrics` | Evidence Precision/Recall/F1/Success/MRR/nDCG at each requested paragraph cutoff |
 | `max_answer_f1` | SQuAD-style token F1 against the best of several human gold answers |
 | `abstention_precision_recall` | Were abstentions actually on unanswerable questions? |
 | `grounded_answer_f1` | Answer F1 computed **only** when retrieval recovered at least one gold paragraph — separates generation quality from retrieval failure |
 
 Every graph evaluation row records its exact `graph_input`, context mode, and
 context source (`original_user_query`, `user_selected_session`,
-`diagnostic_gold_paper_oracle`, or `query_rewrite`). Conditional evidence
-metrics are computed on scored questions where surface search retrieved the
-gold paper in its top five.
+`diagnostic_gold_paper_oracle`, or `query_rewrite`). Each graph row also
+records `evidence_searched_paper_ids`. Conditional evidence metrics only use
+eligible questions where the evidence ranker actually searched the gold paper.
 
 The answer-normalisation logic is a starter implementation; for reported research numbers it should be checked against the official QASPER evaluation script.
 

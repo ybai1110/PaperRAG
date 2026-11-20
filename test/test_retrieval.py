@@ -390,3 +390,42 @@ def test_api_accepts_selected_paper_context(monkeypatch) -> None:
     assert body["question_context_mode"] == "paper_anchored"
     assert body["paper_context_source"] == "user_selected_session"
     assert {item["paper_id"] for item in body["evidence"]} == {"qasper"}
+
+
+@pytest.mark.parametrize(
+    ("general_override", "selected_override", "standalone_count", "selected_count"),
+    [(None, None, 5, 10), ("7", None, 7, 7), ("7", "5", 7, 5), (None, "8", 5, 8)],
+)
+def test_api_evidence_cutoffs(
+    monkeypatch, general_override, selected_override, standalone_count, selected_count
+) -> None:
+    papers = sample_papers()
+    papers[0]["full_text"]["paragraphs"][0].extend(
+        f"Dataset observation number {index} is described." for index in range(12)
+    )
+    monkeypatch.setattr(api_main, "load_dataset", lambda *args, **kwargs: papers)
+    monkeypatch.setenv("PAPERRAG_MODEL_MODE", "deterministic")
+    monkeypatch.delenv("EVIDENCE_PER_PAPER_LIMIT", raising=False)
+    for key, value in (
+        ("EVIDENCE_TOP_K", general_override),
+        ("SELECTED_PAPER_EVIDENCE_TOP_K", selected_override),
+    ):
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+
+    with TestClient(api_main.app) as client:
+        for selection, count in (
+            ({}, standalone_count),
+            ({"selected_paper_id": "qasper"}, selected_count),
+        ):
+            response = client.post(
+                "/search", json={"query": "What dataset does QASPER use?", **selection}
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body["route"] == "targeted_qa"
+            assert len(body["evidence"]) == count
+            if selection:
+                assert {item["paper_id"] for item in body["evidence"]} == {"qasper"}

@@ -23,18 +23,12 @@ def get_api_url() -> str:
 
 
 def choose_paper(paper_id: str, title: str) -> None:
-    previous_response = st.session_state.response
-    unresolved_query = (
-        str(previous_response.get("query") or "").strip()
-        if previous_response
-        and previous_response.get("route") == "needs_context"
-        else ""
-    )
+    unresolved_query = st.session_state.pending_question
     st.session_state.selected_paper = {
         "paper_id": paper_id,
         "title": title,
     }
-    st.session_state.query = unresolved_query
+    st.session_state.query = unresolved_query or ""
     st.session_state.error = None
     if unresolved_query:
         # Resolve the prior clarification by rerunning the original wording
@@ -50,6 +44,28 @@ def clear_paper() -> None:
     st.session_state.query = ""
     st.session_state.response = None
     st.session_state.error = None
+    reset_clarification()
+
+
+def reset_clarification() -> None:
+    st.session_state.pending_question = None
+    st.session_state.paper_results = None
+    st.session_state.paper_search_error = None
+
+
+def search_paper_titles(title: str) -> None:
+    st.session_state.paper_results = None
+    st.session_state.paper_search_error = None
+    if not title:
+        st.session_state.paper_search_error = "Enter a paper title."
+        return
+
+    try:
+        response = requests.get(f"{get_api_url()}/papers", params={"title": title}, timeout=30)
+        response.raise_for_status()
+        st.session_state.paper_results = response.json()["results"]
+    except (requests.RequestException, ValueError) as exc:
+        st.session_state.paper_search_error = f"Paper search could not complete: {exc}"
 
 
 def search(query: str) -> None:
@@ -78,6 +94,12 @@ def search(query: str) -> None:
         data["query"] = query
         st.session_state.response = data
         st.session_state.error = None
+        if data.get("route") == "needs_context":
+            st.session_state.pending_question = query
+        elif data.get("paper_context_error"):
+            st.session_state.error = data["paper_context_error"]
+        else:
+            reset_clarification()
     except requests.Timeout:
         st.session_state.error = (
             "The request timed out. The backend may be waking up; try once more."
@@ -146,6 +168,9 @@ for key, default in {
     "response": None,
     "error": None,
     "selected_paper": None,
+    "pending_question": None,
+    "paper_results": None,
+    "paper_search_error": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -181,6 +206,7 @@ if submitted:
         st.session_state.error = "Enter at least two characters."
         st.session_state.response = None
     else:
+        reset_clarification()
         with st.spinner("Searching papers and retrieving evidence…"):
             search(cleaned_query)
 
@@ -201,9 +227,6 @@ if data:
     if data.get("route_reason"):
         st.caption(data["route_reason"])
 
-    if route == "needs_context":
-        st.warning(data.get("clarification") or "Which paper or model do you mean?")
-
     if route == "targeted_qa":
         if data.get("abstained"):
             st.warning("The retrieved passages were not strong enough to answer confidently.")
@@ -219,6 +242,29 @@ if data:
             for index, citation in enumerate(citations, start=1):
                 render_citation(citation, index)
 
+if st.session_state.pending_question:
+    st.warning("Which paper do you mean?")
+    st.caption(f"Pending question: {st.session_state.pending_question}")
+    with st.form("paper_title_search"):
+        title = st.text_input("Paper title", max_chars=1000)
+        find_papers = st.form_submit_button("Search paper titles")
+    if find_papers:
+        search_paper_titles(title.strip())
+    if st.session_state.paper_search_error:
+        st.error(st.session_state.paper_search_error)
+
+    paper_results = st.session_state.paper_results
+    if paper_results is not None:
+        if paper_results:
+            st.markdown("### Paper title matches")
+            for index, paper in enumerate(paper_results, start=1):
+                render_paper(paper, index, [])
+        else:
+            st.info("No matching papers. Try a shorter part of the title.")
+    elif data and data.get("route") == "needs_context":
+        for index, paper in enumerate(data.get("results") or [], start=1):
+            render_paper(paper, index, [])
+elif data:
     papers = data.get("results") or []
     evidence = data.get("evidence") or []
     st.markdown("### Retrieved papers")

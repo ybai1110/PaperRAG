@@ -9,6 +9,7 @@ reviewed questions whose final context label is sufficiently standalone.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -25,9 +26,9 @@ from rank_bm25 import BM25Okapi
 from src.agent.deterministic_model import DeterministicEvaluationModel
 from src.agent.generator import make_answer_generation_node
 from src.agent.graph import build_graph
-from src.config import PARAGRAPHS_CSV, QUESTIONS_CSV, RANDOM_SEED, create_directories
+from src.config import PARAGRAPHS_CSV, QUESTIONS_CSV, RANDOM_SEED
 from src.data.question_context_audit import DEFAULT_OUTPUT as CONTEXT_AUDIT_CSV
-from src.data.question_context_audit import VALID_LABELS
+from src.data.question_context_audit import LABEL_TO_ROUTE, VALID_LABELS
 from src.evaluation.metrics import (
     abstention_precision_recall,
     evidence_ranking_metrics,
@@ -37,12 +38,14 @@ from src.evaluation.metrics import (
     paper_recall_at_k,
 )
 from src.retrieval.bm25 import parse_json_list, tokenize
+from src.retrieval.evidence_bm25 import build_evidence_documents
 from src.retrieval.paper_bm25 import build_paper_retriever
 
 
 DEFAULT_METRICS_PATH = Path("results/metrics/context_aware_graph_evaluation.json")
 DEFAULT_LOG_PATH = Path("results/logs/context_aware_graph_evaluation.jsonl")
 STANDALONE_LABELS = {"standalone_discovery", "standalone_targeted"}
+EVIDENCE_METRIC_NAMES = ("precision", "recall", "f1", "success", "mrr", "ndcg")
 
 
 def _mean(values: Iterable[float | None]) -> float | None:
@@ -58,9 +61,22 @@ def _truthy(value: object) -> bool:
     return str(value).strip().casefold() in {"true", "1", "yes", "y"}
 
 
-def _load_audit(audit_path: Path | None) -> pd.DataFrame:
-    if audit_path is None or not audit_path.exists():
-        return pd.DataFrame()
+def _corpus_fingerprint(
+    papers: Iterable[dict[str, Any]], documents: Iterable[dict[str, Any]]
+) -> str:
+    digest = hashlib.sha256()
+    for paper in papers:
+        fields = [str(paper["id"]), str(paper.get("title") or ""), str(paper.get("abstract") or "")]
+        digest.update(json.dumps(fields, ensure_ascii=False).encode("utf-8") + b"\n")
+    for document in documents:
+        fields = [document[key] for key in ("paper_id", "paragraph_id", "section", "text")]
+        digest.update(json.dumps(fields, ensure_ascii=False).encode("utf-8") + b"\n")
+    return digest.hexdigest()
+
+
+def _load_audit(audit_path: Path | None) -> pd.DataFrame | None:
+    if audit_path is None:
+        return None
     audit = pd.read_csv(
         audit_path,
         dtype={"question_id": "string", "paper_id": "string"},
@@ -69,7 +85,6 @@ def _load_audit(audit_path: Path | None) -> pd.DataFrame:
         "question_id",
         "proposed_context_label",
         "final_context_label",
-        "expected_route",
         "manual_review_complete",
     }
     missing = required - set(audit.columns)
@@ -98,21 +113,23 @@ def _select_questions(
     *,
     split: str,
     max_questions: int,
-    audit: pd.DataFrame,
+    audit: pd.DataFrame | None,
 ) -> pd.DataFrame:
     available = questions.loc[questions["data_split"] == split].copy()
-    if available.empty:
-        raise ValueError(f"No processed questions found for split {split!r}.")
-    if not audit.empty:
+    if audit is not None:
         audit_ids = audit["question_id"].astype(str).tolist()
         order = {question_id: index for index, question_id in enumerate(audit_ids)}
         selected = available.loc[
             available["question_id"].astype(str).isin(order)
         ].copy()
+        if selected.empty:
+            raise ValueError(f"Context audit has no question IDs in common with split {split!r}.")
         selected["_audit_order"] = selected["question_id"].astype(str).map(order)
         selected = selected.sort_values("_audit_order", kind="stable").drop(
             columns="_audit_order"
         )
+    elif available.empty:
+        raise ValueError(f"No processed questions found for split {split!r}.")
     else:
         selected = available.sample(
             n=min(max_questions, len(available)), random_state=RANDOM_SEED
@@ -120,10 +137,10 @@ def _select_questions(
     return selected.head(max_questions).copy()
 
 
-def _base_rows(frame: pd.DataFrame, audit: pd.DataFrame) -> list[dict[str, Any]]:
+def _base_rows(frame: pd.DataFrame, audit: pd.DataFrame | None) -> list[dict[str, Any]]:
     audit_by_id = (
         audit.set_index(audit["question_id"].astype(str)).to_dict("index")
-        if not audit.empty
+        if audit is not None
         else {}
     )
     rows = []
@@ -148,12 +165,7 @@ def _base_rows(frame: pd.DataFrame, audit: pd.DataFrame) -> list[dict[str, Any]]
                 ).strip(),
                 "final_context_label": final_label,
                 "manual_review_complete": reviewed,
-                # A proposed route is never copied into expected_route.
-                "reviewed_expected_route": (
-                    str(audit_row.get("expected_route", "")).strip()
-                    if reviewed
-                    else None
-                ),
+                "reviewed_expected_route": LABEL_TO_ROUTE.get(final_label),
             }
         )
     return rows
@@ -167,7 +179,10 @@ def _make_conditions(
     oracle_paper = []
     oracle_evidence = []
     for row in base_rows:
-        standalone = row["final_context_label"] in STANDALONE_LABELS
+        reviewed = row["manual_review_complete"]
+        label = row["final_context_label"]
+        standalone = reviewed and label in STANDALONE_LABELS
+        targeted = reviewed and label == "standalone_targeted"
         raw.append(
             {
                 **row,
@@ -176,8 +191,8 @@ def _make_conditions(
                 "input_context_mode": "standalone",
                 "paper_context_source": "original_user_query",
                 "paper_metric_eligible": standalone,
-                "evidence_metric_eligible": standalone
-                and bool(row["gold_paragraph_ids"]),
+                "evidence_metric_eligible": targeted and bool(row["gold_paragraph_ids"]),
+                "answer_metric_eligible": targeted and bool(row["gold_answers"]),
             }
         )
         if (
@@ -193,6 +208,7 @@ def _make_conditions(
                     "paper_context_source": "user_selected_session",
                     "paper_metric_eligible": True,
                     "evidence_metric_eligible": bool(row["gold_paragraph_ids"]),
+                    "answer_metric_eligible": bool(row["gold_paragraph_ids"]),
                     "reviewed_expected_route": "targeted_qa",
                 }
             )
@@ -205,6 +221,7 @@ def _make_conditions(
                 "paper_context_source": "diagnostic_gold_paper_oracle",
                 "paper_metric_eligible": True,
                 "evidence_metric_eligible": bool(row["gold_paragraph_ids"]),
+                "answer_metric_eligible": bool(row["gold_paragraph_ids"]),
                 "reviewed_expected_route": "targeted_qa",
             }
         )
@@ -217,6 +234,7 @@ def _make_conditions(
                 "paper_context_source": "diagnostic_gold_paper_oracle",
                 "paper_metric_eligible": False,
                 "evidence_metric_eligible": bool(row["gold_paragraph_ids"]),
+                "answer_metric_eligible": bool(row["gold_paragraph_ids"]),
                 "reviewed_expected_route": "targeted_qa",
             }
         )
@@ -225,15 +243,6 @@ def _make_conditions(
         "paper_anchored": anchored,
         "oracle_paper": oracle_paper,
         "oracle_evidence": oracle_evidence,
-    }
-
-
-def _ranking_metrics(
-    gold_paragraph_ids: list[str], retrieved_paragraph_ids: list[str]
-) -> dict[str, float]:
-    return {
-        **evidence_ranking_metrics(gold_paragraph_ids, retrieved_paragraph_ids, 5),
-        **evidence_ranking_metrics(gold_paragraph_ids, retrieved_paragraph_ids, 10),
     }
 
 
@@ -270,6 +279,7 @@ def _record_from_result(
     variant: str,
     latency_ms: float,
     graph_input: dict[str, Any],
+    paragraph_cutoff: int,
 ) -> dict[str, Any]:
     evidence = result.get("evidence_candidates", [])
     citations = result.get("citations", [])
@@ -278,6 +288,16 @@ def _record_from_result(
     ]
     retrieved_paragraph_ids = [str(value["paragraph_id"]) for value in evidence]
     answer = str(result.get("answer") or "")
+    answer_f1 = None
+    grounded_f1 = None
+    if item["answer_metric_eligible"]:
+        answered = result.get("route") == "targeted_qa" and not result.get("abstained")
+        answer_f1 = max_answer_f1(answer, item["gold_answers"]) if answered else 0.0
+        grounded_f1 = grounded_answer_f1(
+            answer, item["gold_answers"], item["gold_paragraph_ids"], retrieved_paragraph_ids
+        )
+        if not answered and grounded_f1 is not None:
+            grounded_f1 = 0.0
     return {
         **item,
         "system_variant": variant,
@@ -288,27 +308,26 @@ def _record_from_result(
         "output_context_mode": result.get("question_context_mode"),
         "output_context_source": result.get("paper_context_source"),
         "retrieved_paper_ids": retrieved_paper_ids,
+        "evidence_searched_paper_ids": result.get("evidence_searched_paper_ids", []),
         "retrieved_paragraph_ids": retrieved_paragraph_ids,
+        "paragraph_cutoff": paragraph_cutoff,
         "answer": answer,
         "citations": citations,
         "clarification": result.get("clarification_question"),
         "abstained": bool(result.get("abstained", False)),
         "citation_scope_violations": result.get("citation_scope_violations", []),
         "latency_ms": latency_ms,
-        "answer_f1": max_answer_f1(answer, item["gold_answers"]),
-        "grounded_answer_f1": grounded_answer_f1(
-            answer,
-            item["gold_answers"],
-            item["gold_paragraph_ids"],
-            retrieved_paragraph_ids,
+        "answer_f1": answer_f1,
+        "grounded_answer_f1": grounded_f1,
+        **evidence_ranking_metrics(
+            item["gold_paragraph_ids"], retrieved_paragraph_ids, paragraph_cutoff
         ),
-        **_ranking_metrics(item["gold_paragraph_ids"], retrieved_paragraph_ids),
         **_citation_checks(citations, evidence, item["gold_paper_id"]),
     }
 
 
 def _run_graph_condition(
-    graph, rows: list[dict[str, Any]], variant: str
+    graph, rows: list[dict[str, Any]], variant: str, *, paragraph_cutoff: int
 ) -> list[dict[str, Any]]:
     records = []
     for item in rows:
@@ -333,6 +352,7 @@ def _run_graph_condition(
                 variant=variant,
                 latency_ms=(time.perf_counter() - started) * 1000,
                 graph_input=graph_input,
+                paragraph_cutoff=paragraph_cutoff,
             )
         )
     return records
@@ -343,6 +363,8 @@ def _oracle_evidence_records(
     paragraphs: pd.DataFrame,
     model,
     variant: str,
+    *,
+    paragraph_cutoff: int,
 ) -> list[dict[str, Any]]:
     paragraph_by_id = {
         str(row["paragraph_id"]): row for _, row in paragraphs.iterrows()
@@ -398,18 +420,22 @@ def _oracle_evidence_records(
                 variant=variant,
                 latency_ms=(time.perf_counter() - started) * 1000,
                 graph_input=graph_input,
+                paragraph_cutoff=paragraph_cutoff,
             )
         )
     return records
 
 
-def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _summarize(
+    records: list[dict[str, Any]], *, paragraph_cutoff: int
+) -> dict[str, Any]:
     paper_rows = [row for row in records if row["paper_metric_eligible"]]
     evidence_rows = [row for row in records if row["evidence_metric_eligible"]]
+    answer_rows = [row for row in records if row["answer_metric_eligible"]]
     conditional_rows = [
         row
         for row in evidence_rows
-        if paper_recall_at_k(row["gold_paper_id"], row["retrieved_paper_ids"], 5)
+        if row["gold_paper_id"] in row["evidence_searched_paper_ids"]
     ]
     route_rows = [
         row for row in records if row.get("reviewed_expected_route") is not None
@@ -424,6 +450,7 @@ def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         else {"abstention_precision": None, "abstention_recall": None}
     )
     metrics: dict[str, Any] = {
+        "paragraph_cutoff": paragraph_cutoff,
         "number_of_questions": len(records),
         "condition_is_diagnostic": (
             bool(records[0]["condition_is_diagnostic"]) if records else None
@@ -454,10 +481,11 @@ def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
             for row in paper_rows
         ),
         "evidence_scored_count": len(evidence_rows),
-        "conditional_evidence_given_gold_paper_at_5_count": len(conditional_rows),
-        "answer_f1": _mean(row["answer_f1"] for row in evidence_rows),
+        "conditional_evidence_given_gold_paper_searched_count": len(conditional_rows),
+        "answer_scored_count": len(answer_rows),
+        "answer_f1": _mean(row["answer_f1"] for row in answer_rows),
         "grounded_answer_f1": _mean(
-            row["grounded_answer_f1"] for row in evidence_rows
+            row["grounded_answer_f1"] for row in answer_rows
         ),
         "citation_id_validity": _mean(
             float(row["citation_ids_valid"]) for row in records
@@ -485,56 +513,49 @@ def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         "latency_p95_ms": _percentile([row["latency_ms"] for row in records], 95),
         **abstention,
     }
-    for k in (5, 10):
-        for name in ("precision", "recall", "f1", "success", "mrr", "ndcg"):
-            key = f"evidence_{name}_at_{k}"
-            metrics[key] = _mean(row[key] for row in evidence_rows)
-            metrics[f"conditional_{key}_given_gold_paper_at_5"] = _mean(
-                row[key] for row in conditional_rows
-            )
+    for name in EVIDENCE_METRIC_NAMES:
+        key = f"evidence_{name}_at_{paragraph_cutoff}"
+        metrics[key] = _mean(row[key] for row in evidence_rows)
+        metrics[f"conditional_{key}_given_gold_paper_searched"] = _mean(
+            row[key] for row in conditional_rows
+        )
     return metrics
 
 
 def _direct_bm25(
-    paragraphs: pd.DataFrame,
+    documents: list[dict[str, Any]],
     rows: list[dict[str, Any]],
     *,
     top_k: int,
     contextual: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    indexed_text = paragraphs["paragraph_text"].astype(str)
-    variant = "original_direct_paragraph_bm25"
-    if contextual:
-        indexed_text = (
-            paragraphs["paper_title"].astype(str)
-            + " "
-            + paragraphs["section_name"].astype(str)
-            + " "
-            + indexed_text
-        )
-        variant = "contextual_direct_paragraph_bm25"
-    bm25 = BM25Okapi([tokenize(text) for text in indexed_text])
+    text_key = "search_text" if contextual else "text"
+    name = "contextual" if contextual else "original"
+    variant = f"{name}_direct_paragraph_bm25_evidence_k{top_k}"
+    bm25 = BM25Okapi([tokenize(document[text_key]) for document in documents])
     records = []
     for item in rows:
         started = time.perf_counter()
         scores = bm25.get_scores(tokenize(item["question"]))
         indices = np.argsort(-scores, kind="stable")[: min(top_k, len(scores))]
-        retrieved = paragraphs.iloc[indices]
-        paper_ids = retrieved["paper_id"].astype(str).tolist()
-        paragraph_ids = retrieved["paragraph_id"].astype(str).tolist()
+        retrieved = [documents[index] for index in indices]
+        paper_ids = [str(document["paper_id"]) for document in retrieved]
+        paragraph_ids = [str(document["paragraph_id"]) for document in retrieved]
         records.append(
             {
                 **item,
                 "system_variant": variant,
+                "paragraph_cutoff": top_k,
                 "retrieved_paper_ids": paper_ids,
                 "retrieved_paragraph_ids": paragraph_ids,
                 "latency_ms": (time.perf_counter() - started) * 1000,
-                **_ranking_metrics(item["gold_paragraph_ids"], paragraph_ids),
+                **evidence_ranking_metrics(item["gold_paragraph_ids"], paragraph_ids, top_k),
             }
         )
     paper_rows = [row for row in records if row["paper_metric_eligible"]]
     evidence_rows = [row for row in records if row["evidence_metric_eligible"]]
     metrics: dict[str, Any] = {
+        "paragraph_cutoff": top_k,
         "number_of_questions": len(records),
         "paper_retrieval_availability": _mean(
             float(bool(row["retrieved_paper_ids"])) for row in records
@@ -560,10 +581,9 @@ def _direct_bm25(
         "latency_p50_ms": _percentile([row["latency_ms"] for row in records], 50),
         "latency_p95_ms": _percentile([row["latency_ms"] for row in records], 95),
     }
-    for k in (5, 10):
-        for name in ("precision", "recall", "f1", "success", "mrr", "ndcg"):
-            key = f"evidence_{name}_at_{k}"
-            metrics[key] = _mean(row[key] for row in evidence_rows)
+    for name in EVIDENCE_METRIC_NAMES:
+        key = f"evidence_{name}_at_{top_k}"
+        metrics[key] = _mean(row[key] for row in evidence_rows)
     return records, metrics
 
 
@@ -576,14 +596,20 @@ def evaluate(
     output_log_path: Path,
     split: str,
     max_questions: int,
-    direct_top_k: int,
+    direct_top_k: int | None = None,
     title_weights: list[int],
-    evidence_top_k_values: list[int],
+    evidence_top_k_values: list[int] | None = None,
     per_paper_limits: list[int | None],
     model_mode: str,
     evidence_retriever_mode: str = "hybrid",
 ) -> dict[str, Any]:
-    create_directories()
+    default_cutoff = direct_top_k if direct_top_k is not None else 10
+    cutoffs = list(dict.fromkeys(evidence_top_k_values or [default_cutoff]))
+    if direct_top_k is not None and direct_top_k not in cutoffs:
+        raise ValueError("The direct paragraph cutoff must match one of the graph paragraph cutoffs.")
+    if any(cutoff <= 0 for cutoff in cutoffs) or max_questions <= 0:
+        raise ValueError("Paragraph cutoffs and max_questions must be positive.")
+    headline_cutoff = direct_top_k if direct_top_k is not None else cutoffs[0]
     paragraphs = pd.read_csv(
         paragraphs_path,
         dtype={"paper_id": "string", "paragraph_id": "string"},
@@ -602,20 +628,32 @@ def evaluate(
     base_rows = _base_rows(selected, audit)
     conditions = _make_conditions(base_rows)
 
-    all_records: list[dict[str, Any]] = []
-    direct_metrics = {}
-    for contextual in (False, True):
-        records, metrics = _direct_bm25(
-            paragraphs,
-            conditions["raw_open_domain"],
-            top_k=max(direct_top_k, 10),
-            contextual=contextual,
-        )
-        all_records.extend(records)
-        direct_metrics[records[0]["system_variant"] if records else str(contextual)] = metrics
-
     dataset = list(load_dataset("allenai/qasper", split=split))
     paper_store = {str(paper["id"]): paper for paper in dataset}
+    if len(paper_store) != len(dataset):
+        raise ValueError(f"QASPER split {split!r} contains duplicate paper IDs.")
+    documents = build_evidence_documents(dataset)
+    if not documents:
+        raise ValueError(f"QASPER split {split!r} has no searchable paragraphs.")
+
+    all_records: list[dict[str, Any]] = []
+    direct_metrics = {}
+    comparisons = {
+        str(cutoff): {"direct_variants": [], "graph_variants": []} for cutoff in cutoffs
+    }
+    for cutoff in cutoffs:
+        for contextual in (False, True):
+            records, metrics = _direct_bm25(
+                documents,
+                conditions["raw_open_domain"],
+                top_k=cutoff,
+                contextual=contextual,
+            )
+            all_records.extend(records)
+            variant = records[0]["system_variant"]
+            direct_metrics[variant] = metrics
+            comparisons[str(cutoff)]["direct_variants"].append(variant)
+
     if model_mode == "openai":
         if not os.getenv("OPENAI_API_KEY"):
             raise RuntimeError("OPENAI_API_KEY is required for --model-mode openai")
@@ -628,7 +666,7 @@ def evaluate(
     graph_metrics: dict[str, dict[str, dict[str, Any]]] = {}
     for title_weight in title_weights:
         retriever = build_paper_retriever(dataset, title_weight=title_weight)
-        for evidence_top_k in evidence_top_k_values:
+        for evidence_top_k in cutoffs:
             for per_paper_limit in per_paper_limits:
                 limit_label = "none" if per_paper_limit is None else str(per_paper_limit)
                 variant = (
@@ -646,24 +684,40 @@ def evaluate(
                     evidence_retriever_mode=evidence_retriever_mode,
                 )
                 graph_metrics[variant] = {}
+                comparisons[str(evidence_top_k)]["graph_variants"].append(variant)
                 for condition in ("raw_open_domain", "paper_anchored", "oracle_paper"):
-                    records = _run_graph_condition(graph, conditions[condition], variant)
+                    records = _run_graph_condition(
+                        graph, conditions[condition], variant, paragraph_cutoff=evidence_top_k
+                    )
                     all_records.extend(records)
-                    graph_metrics[variant][condition] = _summarize(records)
+                    graph_metrics[variant][condition] = _summarize(
+                        records, paragraph_cutoff=evidence_top_k
+                    )
                 oracle_records = _oracle_evidence_records(
-                    conditions["oracle_evidence"], paragraphs, model, variant
+                    conditions["oracle_evidence"], paragraphs, model, variant,
+                    paragraph_cutoff=evidence_top_k,
                 )
                 all_records.extend(oracle_records)
-                graph_metrics[variant]["oracle_evidence"] = _summarize(oracle_records)
+                graph_metrics[variant]["oracle_evidence"] = _summarize(
+                    oracle_records, paragraph_cutoff=evidence_top_k
+                )
 
-    raw_metric_candidates = [
-        (variant, values["raw_open_domain"])
-        for variant, values in graph_metrics.items()
-        if values["raw_open_domain"]["evidence_f1_at_10"] is not None
+    headline_candidates = [
+        (variant, graph_metrics[variant]["raw_open_domain"])
+        for variant in comparisons[str(headline_cutoff)]["graph_variants"]
+        if graph_metrics[variant]["raw_open_domain"]["manual_route_labeled_count"]
     ]
+    headline_key = f"evidence_f1_at_{headline_cutoff}"
     selected_variant = (
-        max(raw_metric_candidates, key=lambda item: item[1]["evidence_f1_at_10"])[0]
-        if raw_metric_candidates
+        max(
+            headline_candidates,
+            key=lambda item: (
+                item[1][headline_key] is not None,
+                item[1][headline_key] or 0.0,
+                item[1]["route_accuracy"],
+            ),
+        )[0]
+        if headline_candidates
         else None
     )
     pending_count = sum(not row["manual_review_complete"] for row in base_rows)
@@ -671,6 +725,10 @@ def evaluate(
         "metadata": {
             "random_seed": RANDOM_SEED,
             "split": split,
+            "paper_count": len(paper_store),
+            "paragraph_count": len(documents),
+            "corpus_fingerprint_sha256": _corpus_fingerprint(dataset, documents),
+            "paragraph_cutoffs": cutoffs,
             "max_questions": max_questions,
             "selected_question_ids": [row["question_id"] for row in base_rows],
             "context_audit_path": str(audit_path) if audit_path else None,
@@ -683,12 +741,14 @@ def evaluate(
                 "retained only outside graph_input for post-hoc scoring."
             ),
             "normal_scoring_policy": (
-                "Raw paper/evidence correctness is calculated only for manually "
-                "reviewed standalone_discovery or standalone_targeted questions."
+                "Reviewed standalone discovery and targeted questions enter paper scoring. "
+                "Reviewed standalone targeted questions with gold paragraphs enter evidence "
+                "scoring, and those with gold answers enter Answer F1. Eligibility is based "
+                "on the reviewed task regardless of the predicted route."
             ),
             "conditional_evidence_definition": (
                 "Evidence metrics restricted to scored questions where the gold "
-                "paper occurs in surface-search top 5."
+                "paper was in the evidence ranker's searched corpus."
             ),
             "semantic_citation_support": (
                 "Not measured. Structural ID/passage checks do not establish that "
@@ -709,6 +769,7 @@ def evaluate(
             },
         },
         "headline_open_domain": {
+            "paragraph_cutoff": headline_cutoff,
             "selected_variant": selected_variant,
             "metrics": (
                 graph_metrics[selected_variant]["raw_open_domain"]
@@ -721,6 +782,7 @@ def evaluate(
                 else "pending manual context review; no proposed labels were used as gold"
             ),
         },
+        "comparisons_by_cutoff": comparisons,
         "direct_retrieval": direct_metrics,
         "graph_conditions_separate": graph_metrics,
     }
@@ -742,16 +804,28 @@ def _parse_limits(values: list[str]) -> list[int | None]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--paragraphs", type=Path, default=PARAGRAPHS_CSV)
+    parser.add_argument(
+        "--paragraphs", type=Path, default=PARAGRAPHS_CSV,
+        help="Processed paragraph CSV for gold-evidence oracle lookup.",
+    )
     parser.add_argument("--questions", type=Path, default=QUESTIONS_CSV)
-    parser.add_argument("--audit", type=Path, default=CONTEXT_AUDIT_CSV)
+    parser.add_argument(
+        "--audit", type=Path,
+        default=CONTEXT_AUDIT_CSV if CONTEXT_AUDIT_CSV.exists() else None,
+    )
     parser.add_argument("--output-metrics", type=Path, default=DEFAULT_METRICS_PATH)
     parser.add_argument("--output-log", type=Path, default=DEFAULT_LOG_PATH)
     parser.add_argument("--split", default="validation", choices=["validation", "train"])
     parser.add_argument("--max-questions", type=int, default=50)
-    parser.add_argument("--direct-top-k", type=int, default=10)
+    parser.add_argument(
+        "--direct-top-k", type=int,
+        help="Shared cutoff when used alone, or the headline cutoff within a sweep.",
+    )
     parser.add_argument("--title-weights", nargs="+", type=int, default=[1])
-    parser.add_argument("--evidence-top-k-values", nargs="+", type=int, default=[10])
+    parser.add_argument(
+        "--evidence-top-k-values", nargs="+", type=int,
+        help="Paragraph cutoffs for both direct BM25 and the graph (default: 10).",
+    )
     parser.add_argument("--per-paper-limits", nargs="+", default=["none"])
     parser.add_argument(
         "--model-mode", choices=["deterministic", "openai"], default="deterministic"
