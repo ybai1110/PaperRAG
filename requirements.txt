@@ -3,6 +3,7 @@ uvicorn==0.52.3
 datasets==3.5.0
 rank-bm25==0.2.2
 numpy==1.26.4
+pyarrow==25.0.1
 python-dotenv==1.1.0
 langgraph==1.2.11
 langchain-openai==1.5.1
