@@ -392,6 +392,37 @@ def test_api_accepts_selected_paper_context(monkeypatch) -> None:
     assert {item["paper_id"] for item in body["evidence"]} == {"qasper"}
 
 
+@pytest.mark.parametrize("retriever_mode", ["bm25", "hybrid"])
+@pytest.mark.parametrize("paragraphs", [[], [["", " "]]])
+def test_api_abstains_when_selected_paper_has_no_passages(
+    monkeypatch, retriever_mode, paragraphs
+) -> None:
+    papers = sample_papers()
+    papers[0]["full_text"]["paragraphs"] = paragraphs
+    graph = build_graph(
+        retriever=build_paper_retriever(papers),
+        router_model=ScriptedModel(),
+        paper_store={paper["id"]: paper for paper in papers},
+        evidence_retriever_mode=retriever_mode,
+    )
+    monkeypatch.setattr(api_main, "graph", graph)
+    client = TestClient(api_main.app)
+
+    response = client.post(
+        "/search",
+        json={"query": "What dataset did they use?", "selected_paper_id": "qasper"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["route"] == "targeted_qa"
+    assert body["selected_paper_id"] == "qasper"
+    assert body["abstained"] is True
+    assert body["abstention_reason"] == "No evidence passages were retrieved."
+    assert body["evidence"] == []
+    assert body["citations"] == []
+
+
 @pytest.mark.parametrize(
     ("general_override", "selected_override", "standalone_count", "selected_count"),
     [(None, None, 5, 10), ("7", None, 7, 7), ("7", "5", 7, 5), (None, "8", 5, 8)],

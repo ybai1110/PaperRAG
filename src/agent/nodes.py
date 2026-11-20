@@ -198,7 +198,12 @@ def make_evidence_retrieval_node(
                     paper_store[paper_id]
                 )
 
-        if not selected_papers:
+        if not any(
+            str(paragraph or "").strip()
+            for paper in selected_papers
+            for section in (paper.get("full_text") or {}).get("paragraphs") or []
+            for paragraph in section or []
+        ):
             return {
                 "evidence_query": state["user_query"],
                 "evidence_candidates": [],
@@ -215,6 +220,26 @@ def make_evidence_retrieval_node(
             )
         else:
             evidence_query = original_query
+
+        result = {
+            "evidence_query": evidence_query,
+            "evidence_candidates": [],
+            "evidence_searched_paper_ids": [],
+        }
+        if paper_anchored:
+            result["intended_paper_id"] = str(state.get("selected_paper_id") or "")
+        elif explicit_candidate is not None:
+            result["intended_paper_id"] = str(
+                explicit_candidate["paper_id"]
+            )
+
+        if not any(
+            str(paragraph or "").strip()
+            for paper in selected_papers
+            for section in ((paper.get("full_text") or {}).get("paragraphs") or [])
+            for paragraph in section
+        ):
+            return result
 
         if retriever_mode == "hybrid" and len(selected_papers) == 1:
             evidence_retriever = build_frozen_hybrid_evidence_retriever(
@@ -238,19 +263,10 @@ def make_evidence_retrieval_node(
             per_group_limit=per_paper_limit,
         )
 
-        result = {
-            "evidence_query": evidence_query,
-            "evidence_candidates": evidence_results,
-            "evidence_searched_paper_ids": list(
-                dict.fromkeys(str(doc["paper_id"]) for doc in evidence_retriever.documents)
-            ),
-        }
-        if paper_anchored:
-            result["intended_paper_id"] = str(state.get("selected_paper_id") or "")
-        elif explicit_candidate is not None:
-            result["intended_paper_id"] = str(
-                explicit_candidate["paper_id"]
-            )
+        result["evidence_candidates"] = evidence_results
+        result["evidence_searched_paper_ids"] = list(
+            dict.fromkeys(str(doc["paper_id"]) for doc in evidence_retriever.documents)
+        )
         return result
 
     return evidence_retrieval_node
