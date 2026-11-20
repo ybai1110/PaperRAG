@@ -46,6 +46,7 @@ DEFAULT_METRICS_PATH = Path("results/metrics/context_aware_graph_evaluation.json
 DEFAULT_LOG_PATH = Path("results/logs/context_aware_graph_evaluation.jsonl")
 STANDALONE_LABELS = {"standalone_discovery", "standalone_targeted"}
 EVIDENCE_METRIC_NAMES = ("precision", "recall", "f1", "success", "mrr", "ndcg")
+SURFACE_TOP_K = 10
 
 
 def _mean(values: Iterable[float | None]) -> float | None:
@@ -250,9 +251,17 @@ def _citation_checks(
     citations: list[dict[str, Any]],
     evidence: list[dict[str, Any]],
     intended_paper_id: str,
+    *,
+    answered: bool,
 ) -> dict[str, bool | None]:
     evidence_by_id = {str(item["paragraph_id"]): item for item in evidence}
     citation_ids = [str(item.get("paragraph_id", "")) for item in citations]
+    if not citations:
+        return dict.fromkeys(
+            ("citation_ids_valid", "citation_passages_match", "citation_ids_unique",
+             "citations_from_intended_paper"),
+            False if answered else None,
+        )
     return {
         "citation_ids_valid": all(item_id in evidence_by_id for item_id in citation_ids),
         "citation_passages_match": all(
@@ -288,13 +297,20 @@ def _record_from_result(
     ]
     retrieved_paragraph_ids = [str(value["paragraph_id"]) for value in evidence]
     answer = str(result.get("answer") or "")
+    answered = result.get("route") == "targeted_qa" and not result.get("abstained")
     answer_f1 = None
     grounded_f1 = None
     if item["answer_metric_eligible"]:
-        answered = result.get("route") == "targeted_qa" and not result.get("abstained")
         answer_f1 = max_answer_f1(answer, item["gold_answers"]) if answered else 0.0
+        evidence_by_id = {str(passage["paragraph_id"]): passage["text"] for passage in evidence}
+        cited_ids = [
+            pid for citation in citations
+            if (pid := str(citation.get("paragraph_id", ""))) in evidence_by_id
+            and citation.get("passage") == evidence_by_id[pid]
+        ]
         grounded_f1 = grounded_answer_f1(
-            answer, item["gold_answers"], item["gold_paragraph_ids"], retrieved_paragraph_ids
+            answer, item["gold_answers"], item["gold_paragraph_ids"], retrieved_paragraph_ids,
+            cited_ids,
         )
         if not answered and grounded_f1 is not None:
             grounded_f1 = 0.0
@@ -322,7 +338,7 @@ def _record_from_result(
         **evidence_ranking_metrics(
             item["gold_paragraph_ids"], retrieved_paragraph_ids, paragraph_cutoff
         ),
-        **_citation_checks(citations, evidence, item["gold_paper_id"]),
+        **_citation_checks(citations, evidence, item["gold_paper_id"], answered=answered),
     }
 
 
@@ -488,11 +504,12 @@ def _summarize(
             row["grounded_answer_f1"] for row in answer_rows
         ),
         "citation_id_validity": _mean(
-            float(row["citation_ids_valid"]) for row in records
+            row["citation_ids_valid"] for row in records
         ),
         "citation_passage_validity": _mean(
-            float(row["citation_passages_match"]) for row in records
+            row["citation_passages_match"] for row in records
         ),
+        "citation_validation_count": sum(row["citation_ids_valid"] is not None for row in records),
         "citations_from_intended_paper": _mean(
             None
             if row["citations_from_intended_paper"] is None
@@ -528,6 +545,7 @@ def _direct_bm25(
     *,
     top_k: int,
     contextual: bool,
+    paper_top_k: int = SURFACE_TOP_K,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     text_key = "search_text" if contextual else "text"
     name = "contextual" if contextual else "original"
@@ -537,10 +555,14 @@ def _direct_bm25(
     for item in rows:
         started = time.perf_counter()
         scores = bm25.get_scores(tokenize(item["question"]))
-        indices = np.argsort(-scores, kind="stable")[: min(top_k, len(scores))]
-        retrieved = [documents[index] for index in indices]
-        paper_ids = [str(document["paper_id"]) for document in retrieved]
-        paragraph_ids = [str(document["paragraph_id"]) for document in retrieved]
+        indices = np.argsort(-scores, kind="stable") if np.any(scores) else []
+        best_papers = {}
+        for index in indices:
+            best_papers[str(documents[index]["paper_id"])] = None
+            if len(best_papers) == paper_top_k:
+                break
+        paper_ids = list(best_papers)
+        paragraph_ids = [str(documents[index]["paragraph_id"]) for index in indices[:top_k]]
         records.append(
             {
                 **item,
@@ -670,7 +692,7 @@ def evaluate(
             for per_paper_limit in per_paper_limits:
                 limit_label = "none" if per_paper_limit is None else str(per_paper_limit)
                 variant = (
-                    f"two_stage_graph_title_w{title_weight}_paper_k10_"
+                    f"two_stage_graph_title_w{title_weight}_paper_k{SURFACE_TOP_K}_"
                     f"evidence_k{evidence_top_k}_limit{limit_label}_"
                     f"retriever_{evidence_retriever_mode}_{model_mode}"
                 )
@@ -678,7 +700,7 @@ def evaluate(
                     retriever=retriever,
                     router_model=model,
                     paper_store=paper_store,
-                    surface_top_k=10,
+                    surface_top_k=SURFACE_TOP_K,
                     evidence_top_k=evidence_top_k,
                     evidence_per_paper_limit=per_paper_limit,
                     evidence_retriever_mode=evidence_retriever_mode,
@@ -751,8 +773,8 @@ def evaluate(
                 "paper was in the evidence ranker's searched corpus."
             ),
             "semantic_citation_support": (
-                "Not measured. Structural ID/passage checks do not establish that "
-                "a cited passage semantically supports the generated claim."
+                "Review saved answer and citation text offline with "
+                "python -m src.evaluation.review_citations."
             ),
             "condition_definitions": {
                 "raw_open_domain": "No paper ID/title supplied to the graph; headline condition.",

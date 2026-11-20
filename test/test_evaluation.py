@@ -1,8 +1,14 @@
-"""Small unit tests for the Phase 3 metric functions."""
+"""Regression tests for benchmark metrics and ranking."""
 
+import json
 import pytest
 
-from src.evaluation.evaluate_graph import _make_conditions, _run_graph_condition
+from src.evaluation.evaluate_graph import (
+    _direct_bm25,
+    _make_conditions,
+    _record_from_result,
+    _run_graph_condition,
+)
 from src.evaluation.metrics import (
     abstention_precision_recall,
     evidence_ranking_metrics,
@@ -13,6 +19,7 @@ from src.evaluation.metrics import (
     paper_recall_at_k,
     token_f1,
 )
+from src.evaluation.review_citations import review_citations
 
 
 def test_paper_recall_at_k() -> None:
@@ -64,6 +71,79 @@ def test_grounded_answer_f1_is_none_without_gold_evidence() -> None:
         retrieved_paragraph_ids=["paper_b_p2"],
     )
     assert score is None
+
+
+@pytest.mark.parametrize(
+    ("citation_id", "grounded_f1", "valid"),
+    [("distractor", 0.0, True), ("gold", 1.0, True), (None, 0.0, False)],
+)
+def test_citation_validation_and_grounded_answer_f1(citation_id, grounded_f1, valid):
+    passages = [
+        {"paper_id": "p", "paragraph_id": "gold", "text": "The dataset is SQuAD."},
+        {"paper_id": "p", "paragraph_id": "distractor", "text": "Experiments ran on one GPU."},
+    ]
+    citations = [
+        {**p, "passage": p["text"]} for p in passages if p["paragraph_id"] == citation_id
+    ]
+    row = _record_from_result(
+        {"gold_answers": ["SQuAD"], "gold_paper_id": "p", "gold_paragraph_ids": ["gold"],
+         "answer_metric_eligible": True},
+        {"route": "targeted_qa", "answer": "SQuAD", "evidence_candidates": passages,
+         "citations": citations},
+        variant="test", latency_ms=0, graph_input={}, paragraph_cutoff=5,
+    )
+    assert row["answer_f1"] == 1.0
+    assert row["grounded_answer_f1"] == grounded_f1
+    assert row["citation_ids_valid"] is valid
+    assert row["citation_passages_match"] is valid
+
+
+def test_direct_bm25_ranks_unique_papers_independently_of_paragraph_cutoff():
+    documents = [
+        {"paper_id": paper, "paragraph_id": f"p{i}", "text": content}
+        for i, (paper, content) in enumerate([
+            ("a", "orbit orbit orbit"), ("a", "orbit orbit"), ("b", "orbit"),
+            ("c", "gravity"), ("d", "crater"), ("e", "motion"), ("f", "comet"),
+        ])
+    ]
+    item = {
+        "gold_paper_id": "b", "gold_paragraph_ids": ["p2"],
+        "paper_metric_eligible": True, "evidence_metric_eligible": True,
+    }
+    rows, metrics = _direct_bm25(
+        documents, [{**item, "question": "orbit"}, {**item, "question": "unknown"}],
+        top_k=2, contextual=False, paper_top_k=2,
+    )
+    assert rows[0]["retrieved_paragraph_ids"] == ["p0", "p1"]
+    assert rows[0]["retrieved_paper_ids"] == ["a", "b"]
+    assert rows[1]["retrieved_paper_ids"] == rows[1]["retrieved_paragraph_ids"] == []
+    assert metrics["paper_mrr_at_10"] == 0.25
+
+
+def test_saved_citation_review_counts_answered_rows_and_review_coverage(tmp_path):
+    log = tmp_path / "log.jsonl"
+    review = tmp_path / "review.json"
+    record = {
+        "condition": "raw_open_domain", "route": "targeted_qa", "abstained": False,
+        "question_id": "one", "system_variant": "test", "question": "Which dataset?",
+        "answer": "SQuAD", "citations": [{"passage": "The dataset is SQuAD."}],
+    }
+    log.write_text("\n".join(map(json.dumps, [
+        record, {**record, "question_id": "two", "citations": []},
+        {**record, "question_id": "three", "abstained": True},
+        {**record, "question_id": "four", "route": "discovery", "answer": ""},
+    ])))
+    stats = review_citations(log, review, "raw_open_domain")
+    assert stats["review_denominator"] == 2
+    assert stats["review_coverage"] == 0
+    assert stats["citation_coverage"] == 0.5
+    payload = json.loads(review.read_text())
+    payload["rows"][0]["verdict"] = "supported"
+    review.write_text(json.dumps(payload))
+    stats = review_citations(log, review, "raw_open_domain")
+    assert stats["reviewed_count"] == 1
+    assert stats["review_coverage"] == 0.5
+    assert stats["supported_rate_among_reviewed"] == 1.0
 
 
 def test_abstention_metrics() -> None:

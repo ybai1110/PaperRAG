@@ -12,7 +12,7 @@ Unlike a standard RAG demo, PaperRAG treats QASPER as an **open-domain** task: t
 
 | Capability | How |
 | --- | --- |
-| **Two-stage retrieval** | BM25 over a configurable title weight plus abstract, then BM25 over `paper title + section + paragraph` inside candidate papers |
+| **Two-stage retrieval** | Paper BM25 ranks titles and abstracts. Evidence ranking uses BM25–LSA fusion over section and paragraph text when exactly one paper is in scope and hybrid mode is enabled (the default). Multi-paper evidence search uses BM25 over title, section, and paragraph. |
 | **Intent routing** | An LLM router classifies each query as `discovery`, `targeted_qa`, or `needs_context` and returns a confidence score and a reason |
 | **Grounded generation** | Answers are produced only from retrieved passages, with paragraph-level citations |
 | **Citation validation** | Citation IDs and passages are tied to retrieved evidence; duplicates and out-of-scope anchored-paper citations are rejected |
@@ -139,6 +139,7 @@ extractive answers are not production-model quality. Retrieval controls are
 available through `PAPER_TITLE_WEIGHT`, `PAPER_MIN_SCORE`,
 `PAPER_MAX_SCORE_DROP`, `PAPER_TOP_K`, `EVIDENCE_MAX_PAPERS`,
 `EVIDENCE_TOP_K`, and `EVIDENCE_PER_PAPER_LIMIT`.
+Set `EVIDENCE_RETRIEVER_MODE=bm25` to use lexical BM25 for single-paper QA too.
 
 Standalone QA requests up to five evidence passages by default. Selected-paper
 QA uses `SELECTED_PAPER_EVIDENCE_TOP_K`, then `EVIDENCE_TOP_K` if explicitly set,
@@ -148,7 +149,7 @@ selected-paper default.
 ### Run the UI
 
 ```bash
-pip install streamlit requests
+pip install -r frontend/requirements.txt
 export PIPELINE_API_URL=http://localhost:8000
 streamlit run frontend/app.py
 ```
@@ -268,15 +269,17 @@ not evaluation gold. Only a non-empty `final_context_label` on a row marked
 `standalone_discovery`, `standalone_targeted`,
 `paper_dependent_repairable`, `ambiguous_needs_context`, and `unanswerable`.
 
-**3 — Run the BM25 baseline.** Evaluates retrieval on the audited questions and writes a per-question JSONL log alongside aggregate metrics.
+**3 — Run the legacy BM25 baseline.** This command samples processed train
+questions and writes a per-question JSONL log alongside aggregate metrics.
 
 ```bash
-python -m src.retrieval.bm25 --top-k 10 --audit data/audits/question_audit.csv
+python -m src.retrieval.bm25 --split train --top-k 10 --max-questions 50
 # → results/logs/bm25_results.jsonl
 # → results/metrics/bm25_metrics.json
 ```
 
-Useful flags: `--question-validity` selects which audited category to score,
+If you have a completed legacy audit, pass `--audit` with its path.
+`--question-validity` selects which audited category to score,
 `--question-column` switches between original and rewritten question text,
 `--index-mode contextual` indexes title and section context, and `--split` and
 `--max-questions` restrict the evaluation set. Sampling is deterministic and
@@ -289,7 +292,9 @@ per-query JSONL while keeping `raw_open_domain`, `paper_anchored`,
 ```bash
 python -m src.evaluation.evaluate_graph \
   --split validation \
-  --max-questions 50 \
+  --audit data/audits/question_context_audit_validation.csv \
+  --max-questions 100 \
+  --evidence-top-k-values 5 10 \
   --model-mode deterministic
 ```
 
@@ -300,6 +305,8 @@ default cutoff is 10. `--direct-top-k` sets the shared cutoff on its own or
 selects the headline cutoff from a sweep. The result includes the corpus
 fingerprint, paper and paragraph counts, ordered question IDs, and variant pairs
 for each cutoff. The processed paragraph CSV is used for the evidence oracle.
+Direct BM25 ranks each paper by its best-scoring paragraph, with the same
+paper cutoff as graph surface search and an independent paragraph cutoff.
 
 Completed final context labels determine the expected route. Reviewed standalone
 discovery and targeted questions enter paper scoring. Only reviewed standalone
@@ -331,7 +338,7 @@ Defined in `src/evaluation/metrics.py`:
 | `evidence_ranking_metrics` | Evidence Precision/Recall/F1/Success/MRR/nDCG at each requested paragraph cutoff |
 | `max_answer_f1` | SQuAD-style token F1 against the best of several human gold answers |
 | `abstention_precision_recall` | Were abstentions actually on unanswerable questions? |
-| `grounded_answer_f1` | Answer F1 computed **only** when retrieval recovered at least one gold paragraph — separates generation quality from retrieval failure |
+| `grounded_answer_f1` | Answer F1 on gold-paragraph retrieval hits. Returns zero unless the answer cites a retrieved gold paragraph with matching text. |
 
 Every graph evaluation row records its exact `graph_input`, context mode, and
 context source (`original_user_query`, `user_selected_session`,
@@ -340,6 +347,23 @@ records `evidence_searched_paper_ids`. Conditional evidence metrics only use
 eligible questions where the evidence ranker actually searched the gold paper.
 
 The answer-normalisation logic is a starter implementation; for reported research numbers it should be checked against the official QASPER evaluation script.
+
+### Review citation support offline
+
+```bash
+python -m src.evaluation.review_citations \
+  results/logs/context_aware_graph_evaluation.jsonl \
+  --review results/citation_review.json
+```
+
+The command creates a review file containing questions, answers, and cited
+passages from the saved log. Mark each row's `verdict` as `supported`,
+`partial`, or `unsupported`, and use `notes` for your rationale. Run the same
+command again to tally judgments. It reports the number of answered QA rows,
+the fraction reviewed, the fraction with citations, and the supported fraction
+among reviewed rows. The default condition is `raw_open_domain`; use
+`--condition paper_anchored` to review selected-paper runs. This workflow makes
+no generation calls.
 
 ---
 

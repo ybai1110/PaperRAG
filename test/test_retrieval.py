@@ -145,7 +145,10 @@ def test_targeted_qa_can_abstain() -> None:
     assert result["citations"] == []
 
 
-def test_exact_title_restricts_evidence_to_that_paper() -> None:
+@pytest.mark.parametrize(
+    "title_in_query", ['"qasper  EVALUATION study"', "Qasper Evaluation Study"]
+)
+def test_exact_title_restricts_evidence_to_that_paper(title_in_query) -> None:
     papers = sample_papers()
     node = make_evidence_retrieval_node(
         paper_store={paper["id"]: paper for paper in papers},
@@ -165,7 +168,7 @@ def test_exact_title_restricts_evidence_to_that_paper() -> None:
     result = node(
         {
             "user_query": (
-                'In the paper "QASPER Evaluation Study", which metrics?'
+                f"In the paper {title_in_query}, which metrics?"
             ),
             "paper_candidates": candidates,
         }
@@ -175,7 +178,7 @@ def test_exact_title_restricts_evidence_to_that_paper() -> None:
     assert {
         item["paper_id"] for item in result["evidence_candidates"]
     } <= {"qasper"}
-    assert "QASPER Evaluation Study" not in result["evidence_query"]
+    assert result["evidence_query"] == "In the paper , which metrics?"
 
 
 def test_top_title_is_not_removed_when_absent_from_query() -> None:
@@ -198,6 +201,23 @@ def test_top_title_is_not_removed_when_absent_from_query() -> None:
     )
 
     assert result["evidence_query"] == query
+
+
+def test_title_inside_word_does_not_narrow_evidence_scope() -> None:
+    papers = sample_papers()
+    papers[0]["title"] = "Orbit"
+    papers[1]["title"] = "Orbital Dynamics"
+    node = make_evidence_retrieval_node({paper["id"]: paper for paper in papers})
+    query = "What is orbital motion?"
+    result = node({
+        "user_query": query,
+        "paper_candidates": [
+            {"paper_id": paper["id"], "title": paper["title"]} for paper in papers[:2]
+        ],
+    })
+    assert result["evidence_query"] == query
+    assert result["evidence_searched_paper_ids"] == ["qasper", "discourse"]
+    assert "intended_paper_id" not in result
 
 
 def test_evidence_retriever_mode_reproduces_bm25_and_hybrid() -> None:

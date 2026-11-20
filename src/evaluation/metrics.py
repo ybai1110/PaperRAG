@@ -196,16 +196,17 @@ def grounded_answer_f1(
     gold_answers: Sequence[str],
     gold_paragraph_ids: Sequence[str],
     retrieved_paragraph_ids: Sequence[str],
+    cited_paragraph_ids: Sequence[str] = (),
 ) -> float | None:
     """
-    Return Answer F1 only when at least one gold evidence paragraph was found.
+    Score Answer F1 on gold-retrieval hits, requiring a retrieved gold citation.
 
     None means the question is excluded from the conditional metric because
     retrieval did not recover any gold evidence.
     """
-    evidence_found = bool(
-        set(gold_paragraph_ids) & set(retrieved_paragraph_ids)
-    )
-    if not evidence_found:
+    retrieved_gold = set(gold_paragraph_ids).intersection(retrieved_paragraph_ids)
+    if not retrieved_gold:
         return None
+    if retrieved_gold.isdisjoint(cited_paragraph_ids):
+        return 0.0
     return max_answer_f1(prediction, gold_answers)

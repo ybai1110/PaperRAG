@@ -12,18 +12,25 @@ from src.retrieval.evidence_bm25 import (
 )
 
 
+def _paper_title_pattern(title: str) -> re.Pattern[str]:
+    words = r"\s+".join(re.escape(word) for word in title.split())
+    bounded_title = rf"(?<!\w){words}(?!\w)"
+    return re.compile(
+        rf"""(?:"{bounded_title}"|'{bounded_title}'|“{bounded_title}”|‘{bounded_title}’|{bounded_title})""",
+        re.IGNORECASE,
+    )
+
+
 def find_explicit_paper_title(
     query: str,
     paper_candidates: list[dict],
 ) -> dict | None:
     """Return a candidate only when its complete title occurs in the query."""
-    normalized_query = " ".join(query.casefold().split())
     matches = [
         candidate
         for candidate in paper_candidates
-        if candidate.get("title")
-        and " ".join(str(candidate["title"]).casefold().split())
-        in normalized_query
+        if (title := str(candidate.get("title") or "").strip())
+        and _paper_title_pattern(title).search(query)
     ]
     if not matches:
         return None
@@ -33,13 +40,11 @@ def find_explicit_paper_title(
 
 def remove_explicit_paper_title(query: str, title: str) -> str:
     """Remove a title only when that exact title is present in the query."""
-    cleaned = re.sub(
-        re.escape(title),
-        " ",
-        query,
-        count=1,
-        flags=re.IGNORECASE,
-    )
+    if not title.strip():
+        return query
+    cleaned, replacements = _paper_title_pattern(title).subn(" ", query, count=1)
+    if not replacements:
+        return query
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\n\r\"',")
     return cleaned or query
 
